@@ -163,16 +163,15 @@ def _build_user_prompt(
 
 
 class AIEngine:
-    """Wraps the Ollama Python client for cloud-hosted models.
+    """Wraps the Ollama Python client for local and cloud models.
 
-    Cloud models use the ``provider/model:tag`` naming convention
-    (e.g. ``minimax/m2:5``). Ollama handles routing to its cloud
-    infrastructure automatically — no local model download required.
+    If the requested model isn't available locally, the engine will
+    attempt to pull it automatically.
 
     Parameters
     ----------
     model:
-        Ollama cloud model identifier, e.g. ``minimax/m2:5``.
+        Ollama model identifier, e.g. ``qwen2.5:0.5b`` or ``minimax/m2:5``.
     host:
         Ollama API endpoint. Default is ``http://localhost:11434``.
     timeout:
@@ -184,7 +183,7 @@ class AIEngine:
     def __init__(
         self,
         *,
-        model: str = "minimax/m2:5",
+        model: str = "qwen2.5:0.5b",
         host: str = "http://localhost:11434",
         timeout: float = 180.0,
         max_retries: int = 3,
@@ -197,6 +196,26 @@ class AIEngine:
 
     # ─────────────────── public API ────────────────────────────────
 
+    async def ensure_model(self) -> tuple[bool, str]:
+        """Check if the model exists locally; pull it if not.
+
+        Returns (success, message).
+        """
+        try:
+            models = await asyncio.wait_for(
+                self._client.list(), timeout=15.0
+            )
+            available = [m.model for m in models.models]
+            # Check if our model (or a variant) is available
+            for name in available:
+                if self._model in name or name.startswith(self._model.split(":")[0]):
+                    return True, f"Model '{name}' is ready."
+
+            # Model not found — try to pull it
+            return await self._pull_model()
+        except Exception as exc:
+            return False, f"Cannot check models: {exc}"
+
     async def analyze(
         self,
         error_snippet: str,
@@ -206,7 +225,7 @@ class AIEngine:
         max_iterations: int = 5,
         previous_queries: list[str] | None = None,
     ) -> AIResolution:
-        """Send error + scraped data to the Ollama cloud model.
+        """Send error + scraped data to Ollama.
 
         If the model signals it needs more data (low confidence + refined queries),
         the caller should scrape more threads and call this method again.
@@ -240,9 +259,9 @@ class AIEngine:
             except asyncio.TimeoutError:
                 if attempt == self._max_retries:
                     return AIResolution(
-                        root_cause="Ollama cloud request timed out.",
+                        root_cause="Ollama request timed out.",
                         fix_recommendation=(
-                            "The cloud model did not respond in time. "
+                            "The model did not respond in time. "
                             "Check your internet connection and try again. "
                             "You can also try increasing the timeout with "
                             "the REQUEST_TIMEOUT environment variable."
@@ -259,7 +278,7 @@ class AIEngine:
                     return AIResolution(
                         root_cause=f"Ollama connection error: {exc}",
                         fix_recommendation=(
-                            f"Could not reach Ollama cloud via {self._host}.\n\n"
+                            f"Could not reach Ollama via {self._host}.\n\n"
                             "Troubleshooting:\n"
                             "1. Ensure Ollama is installed: https://ollama.ai\n"
                             "2. Start the server: `ollama serve`\n"
@@ -293,6 +312,21 @@ class AIEngine:
             return False, f"Timed out connecting to Ollama at {self._host}."
         except Exception as exc:
             return False, f"Cannot reach Ollama: {exc}"
+
+    # ─────────────────── internal ──────────────────────────────────
+
+    async def _pull_model(self) -> tuple[bool, str]:
+        """Download the model from Ollama's registry."""
+        try:
+            await asyncio.wait_for(
+                self._client.pull(model=self._model, stream=False),
+                timeout=600.0,
+            )
+            return True, f"Model '{self._model}' pulled successfully."
+        except asyncio.TimeoutError:
+            return False, f"Timed out pulling '{self._model}' (>10 min)."
+        except Exception as exc:
+            return False, f"Failed to pull '{self._model}': {exc}"
 
     # ─────────────────── response parser ───────────────────────────
 

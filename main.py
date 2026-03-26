@@ -6,7 +6,7 @@ Paste an error message and the tool will:
   3. If confidence is Low, refine the search and repeat until a proper fix
      is found or the maximum iteration limit is reached.
 
-Default model: ``minimax/m2:5`` (Ollama cloud — no local download required).
+Default model: ``qwen2.5:0.5b`` (auto-downloaded if missing).
 """
 
 from __future__ import annotations
@@ -133,10 +133,10 @@ async def _run(
     scraper = StackOverflowScraper(proxy_rotator, max_retries=3)
     ai = AIEngine(model=model, host=host)
 
-    # ── Ollama connectivity check ──
+    # ── Ollama connectivity + model check ──
     with Progress(
         SpinnerColumn(),
-        TextColumn("[bold blue]Connecting to Ollama..."),
+        TextColumn("[bold blue]Checking Ollama connection..."),
         transient=True,
         console=console,
     ) as progress:
@@ -147,22 +147,39 @@ async def _run(
         console.print(
             Panel(
                 f"{msg}\n\n"
-                f"Cloud model: [bold]{model}[/bold]\n"
-                f"Host:        [bold]{host}[/bold]\n\n"
+                f"Model: [bold]{model}[/bold]\n"
+                f"Host:  [bold]{host}[/bold]\n\n"
                 "Setup:\n"
                 "  1. Install Ollama: https://ollama.ai\n"
                 "  2. Start the server: [dim]ollama serve[/dim]\n"
-                "  3. No model download needed — cloud models run remotely.\n"
-                "  4. Ensure internet connectivity.",
+                "  3. Ensure internet connectivity.",
                 title="[bold red]Ollama Connection Failed[/bold red]",
                 border_style="red",
             )
         )
         raise SystemExit(1)
 
-    console.print(
-        f"  [green]Ollama connected.[/green]  Cloud model: [bold]{model}[/bold]\n"
-    )
+    # ── Ensure model is available (auto-pull if missing) ──
+    with Progress(
+        SpinnerColumn(),
+        TextColumn(f"[bold blue]Ensuring model '{model}' is ready..."),
+        transient=True,
+        console=console,
+    ) as progress:
+        progress.add_task("model", total=None)
+        model_ok, model_msg = await ai.ensure_model()
+
+    if not model_ok:
+        console.print(
+            Panel(
+                model_msg,
+                title="[bold red]Model Setup Failed[/bold red]",
+                border_style="red",
+            )
+        )
+        raise SystemExit(1)
+
+    console.print(f"  [green]{model_msg}[/green]\n")
 
     # ── Iterative scrape → analyze loop ──
     resolution: AIResolution | None = None
@@ -316,15 +333,15 @@ def _parse_args() -> argparse.Namespace:
             "  %(prog)s -e 'TypeError: ...'                # Direct error input\n"
             "  %(prog)s --no-proxy                         # Skip proxy rotation\n"
             "  %(prog)s --max-iterations 8                 # More iterations\n"
-            "  %(prog)s -m minimax/m2:5                    # Explicit cloud model\n"
+            "  %(prog)s -m llama3.2:3b                     # Use a different model\n"
         ),
     )
     parser.add_argument(
         "-m", "--model",
-        default=os.getenv("OLLAMA_MODEL", "minimax/m2:5"),
+        default=os.getenv("OLLAMA_MODEL", "qwen2.5:0.5b"),
         help=(
-            "Ollama cloud model identifier (default: minimax/m2:5, env: OLLAMA_MODEL). "
-            "Format: provider/model:tag — no local download required."
+            "Ollama model identifier (default: qwen2.5:0.5b, env: OLLAMA_MODEL). "
+            "Auto-downloads if not available locally."
         ),
     )
     parser.add_argument(
