@@ -1,17 +1,17 @@
 # SO Error Resolver
 
-Automatically resolve programming errors by scraping Stack Overflow and analyzing results with Ollama AI models — cloud or local.
+Automatically resolve programming errors by scraping Stack Overflow and analyzing results with Ollama **cloud** models — no GPU, no model download.
 
 ## How It Works
 
 ```
-Error Input → Clean Query → Scrape SO → AI Analysis → [Low Confidence?] → Refine Query → Re-scrape → ... → Fix Found
+Error Input → Clean Query → Scrape SO → Cloud AI Analysis → [Low Confidence?] → Refine Query → Re-scrape → ... → Fix Found
 ```
 
 The tool runs an **iterative loop**:
 
 1. **Scrape** Stack Overflow for threads matching your error.
-2. **Analyze** scraped questions + answers with an Ollama model.
+2. **Analyze** scraped questions + answers with an Ollama cloud model.
 3. **Evaluate** the AI's confidence level.
 4. **Refine** — if confidence is Low, the AI suggests better search queries.
 5. **Repeat** until a High-confidence fix is found or max iterations are reached.
@@ -19,28 +19,28 @@ The tool runs an **iterative loop**:
 ## Prerequisites
 
 - **Python 3.10+**
-- **Ollama** installed and running — [https://ollama.ai](https://ollama.ai)
+- **Ollama** installed — [https://ollama.ai](https://ollama.ai)
+- **Internet connection** — cloud models run on Ollama's infrastructure
 
 ## Installation
 
 ```bash
-# Clone the repo
-git clone https://github.com/YOUR_USERNAME/so-error-resolver.git
+git clone https://github.com/aashed2408/so-error-resolver.git
 cd so-error-resolver
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Ensure Ollama is running
-ollama serve
-
-# Pull the default model (cloud-hosted, no GPU required)
-ollama pull minimax/m2:5
 ```
+
+That's it. No `ollama pull` needed — cloud models are accessed remotely.
 
 ## Usage
 
-### Interactive Mode
+### Start Ollama
+
+```bash
+ollama serve
+```
+
+### Run the Resolver
 
 ```bash
 python main.py
@@ -52,13 +52,6 @@ Paste your error when prompted. Press Enter on an empty line to submit.
 
 ```bash
 python main.py -e "TypeError: 'NoneType' object is not subscriptable"
-```
-
-### Use a Local Model
-
-```bash
-python main.py -m llama3
-python main.py -m mistral
 ```
 
 ### Skip Proxy Rotation
@@ -73,17 +66,20 @@ python main.py --no-proxy
 python main.py --max-iterations 8
 ```
 
+### Use a Different Cloud Model
+
+```bash
+python main.py -m minimax/m2:5
+```
+
 ### Full CLI Reference
 
 ```
-usage: so-error-resolver [-h] [-m MODEL] [--host HOST] [--no-proxy] [-e ERROR]
-                         [--max-iterations MAX_ITERATIONS]
-
-Resolve programming errors by iteratively scraping Stack Overflow and analyzing
-results with Ollama AI models (cloud or local).
+usage: so-error-resolver [-h] [-m MODEL] [--host HOST] [--no-proxy]
+                         [-e ERROR] [--max-iterations MAX_ITERATIONS]
 
 options:
-  -m, --model MODEL           Ollama model identifier (default: minimax/m2:5)
+  -m, --model MODEL           Ollama cloud model (default: minimax/m2:5)
   --host HOST                 Ollama API endpoint (default: http://localhost:11434)
   --no-proxy                  Skip proxy rotation — use direct connections
   -e, --error ERROR           Error message / traceback
@@ -94,10 +90,10 @@ options:
 
 ```
 so-error-resolver/
-├── main.py            # CLI entry point + iterative orchestration loop
+├── main.py            # CLI + iterative orchestration loop
 ├── proxy_manager.py   # Proxy rotation, health checks, UA spoofing
 ├── scraper.py         # SO search + DuckDuckGo/Google fallbacks + extraction
-├── ai_engine.py       # Ollama connector, prompt engineering, response parser
+├── ai_engine.py       # Ollama cloud connector, prompt engineering, parser
 ├── requirements.txt   # Python dependencies
 ├── .env.example       # Environment variable reference
 └── .gitignore
@@ -108,60 +104,43 @@ so-error-resolver/
 #### `main.py`
 - CLI interface using `rich` for formatted output.
 - Orchestrates the iterative scrape → analyze → refine loop.
-- Handles keyboard interrupts gracefully.
+- Generates fallback search queries if the AI doesn't provide any.
 
 #### `scraper.py`
 - Searches Stack Overflow directly, falls back to DuckDuckGo, then Google.
 - Extracts question titles, bodies, code blocks, answers (accepted + top-voted).
 - Tracks seen URLs across iterations to avoid duplicate scraping.
-- Accepts refined queries from the AI engine for broadened search.
 
 #### `ai_engine.py`
-- Connects to Ollama (supports both cloud and local models).
+- Connects to Ollama cloud models — no local model download required.
 - Builds structured prompts with error + scraped data.
-- Parses AI responses into `AIResolution` objects with root cause, fix, confidence, and refined queries.
-- Supports cloud model naming: `minimax/m2:5`, `anthropic/claude-3.5-sonnet`, etc.
+- Parses AI responses into structured `AIResolution` objects.
+- Signals when more scraping is needed via `needs_more_data` + `refined_queries`.
 
 #### `proxy_manager.py`
 - Round-robin proxy rotation with async health checks.
 - Marks proxies unhealthy after 3 consecutive failures.
-- Re-checks unhealthy proxies every 5 minutes.
 - Randomizes User-Agent headers to mimic real browsers.
 
-## Models
+## Cloud Models
 
-### Cloud Models (Recommended)
+Cloud models run on Ollama's infrastructure — no GPU or local download required.
 
-Cloud models run on Ollama's infrastructure — no GPU required.
-
-| Model | Command | Notes |
+| Model | Default | Notes |
 |-------|---------|-------|
-| MiniMax M2 | `ollama pull minimax/m2:5` | Default, fast, good for code |
-| Claude 3.5 Sonnet | `ollama pull anthropic/claude-3.5-sonnet` | High quality reasoning |
-| GPT-4o | `ollama pull openai/gpt-4o` | OpenAI via Ollama cloud |
+| `minimax/m2:5` | Yes | Fast, good for code analysis |
 
-### Local Models
-
-Local models require sufficient RAM/VRAM.
-
-| Model | Command | RAM Needed |
-|-------|---------|------------|
-| Llama 3 8B | `ollama pull llama3` | ~8 GB |
-| Mistral 7B | `ollama pull mistral` | ~6 GB |
-| CodeLlama | `ollama pull codellama` | ~8 GB |
+Any Ollama-compatible cloud model works — just pass it with `-m`.
 
 ## Configuration
 
-Environment variables (or `.env` file):
+Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama API endpoint |
-| `OLLAMA_MODEL` | `minimax/m2:5` | Model to use |
+| `OLLAMA_MODEL` | `minimax/m2:5` | Cloud model identifier |
 | `MAX_ITERATIONS` | `5` | Max scrape-analyze loops |
-| `MAX_RETRIES` | `3` | HTTP request retries |
-| `MAX_THREADS` | `5` | Concurrent scraper threads |
-| `REQUEST_TIMEOUT` | `180` | LLM timeout (seconds) |
 
 ## Error Handling
 

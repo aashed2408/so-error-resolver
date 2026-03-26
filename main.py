@@ -2,11 +2,11 @@
 
 Paste an error message and the tool will:
   1. Scrape Stack Overflow for relevant threads.
-  2. Feed scraped data to an Ollama cloud/local model.
+  2. Feed scraped data to an Ollama cloud model.
   3. If confidence is Low, refine the search and repeat until a proper fix
      is found or the maximum iteration limit is reached.
 
-Default model: ``minimax/m2:5`` (Ollama cloud).
+Default model: ``minimax/m2:5`` (Ollama cloud — no local download required).
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -146,25 +147,26 @@ async def _run(
         console.print(
             Panel(
                 f"{msg}\n\n"
-                f"Model: [bold]{model}[/bold]\n"
-                f"Host:  [bold]{host}[/bold]\n\n"
-                "Troubleshooting:\n"
+                f"Cloud model: [bold]{model}[/bold]\n"
+                f"Host:        [bold]{host}[/bold]\n\n"
+                "Setup:\n"
                 "  1. Install Ollama: https://ollama.ai\n"
                 "  2. Start the server: [dim]ollama serve[/dim]\n"
-                f"  3. Pull the model:  [dim]ollama pull {model}[/dim]\n"
-                "  4. For cloud models, ensure internet connectivity.",
+                "  3. No model download needed — cloud models run remotely.\n"
+                "  4. Ensure internet connectivity.",
                 title="[bold red]Ollama Connection Failed[/bold red]",
                 border_style="red",
             )
         )
         raise SystemExit(1)
 
-    console.print(f"  [green]Ollama connected.[/green]  Model: [bold]{model}[/bold]\n")
+    console.print(
+        f"  [green]Ollama connected.[/green]  Cloud model: [bold]{model}[/bold]\n"
+    )
 
     # ── Iterative scrape → analyze loop ──
     resolution: AIResolution | None = None
     previous_queries: list[str] = []
-    new_questions_batch: list = []
 
     for iteration in range(1, max_iterations + 1):
         # Determine refined queries for this iteration
@@ -182,16 +184,16 @@ async def _run(
             console=console,
         ) as progress:
             progress.add_task("scrape", total=None)
-            new_questions_batch = await scraper.search_and_extract(
+            new_batch = await scraper.search_and_extract(
                 error_text,
                 max_results=5,
                 refined_queries=refined,
             )
 
         total = scraper.total_scraped
-        if new_questions_batch:
+        if new_batch:
             console.print(
-                f"  Found [green bold]{len(new_questions_batch)}[/green bold] new thread(s). "
+                f"  Found [green bold]{len(new_batch)}[/green bold] new thread(s). "
                 f"([dim]{total} total scraped[/dim])\n"
             )
         elif iteration == 1:
@@ -205,7 +207,7 @@ async def _run(
                 "Analyzing with existing data.[/yellow]\n"
             )
 
-        # ── Analyze ──
+        # ── Analyze with cloud model ──
         all_questions = scraper.get_all_questions()
         with Progress(
             SpinnerColumn(),
@@ -255,7 +257,6 @@ async def _run(
                     "Refining search and retrying...[/dim]\n"
                 )
             else:
-                # AI didn't provide queries — generate fallback ones
                 fallback = _generate_fallback_queries(error_text, previous_queries)
                 resolution.refined_queries = fallback
                 console.print(
@@ -270,7 +271,7 @@ async def _run(
             f"[bold]{scraper.total_scraped}[/bold] threads scraped.\n\n"
             "The best available analysis is shown above. Consider:\n"
             "  - Providing a more specific error message\n"
-            "  - Using a more capable model\n"
+            "  - Trying a different cloud model\n"
             "  - Increasing --max-iterations",
             title="[bold yellow]Max Iterations Reached[/bold yellow]",
             border_style="yellow",
@@ -283,10 +284,8 @@ def _generate_fallback_queries(error_text: str, already_tried: list[str]) -> lis
     queries: list[str] = []
     lines = error_text.strip().splitlines()
 
-    # Try to extract the exception class name
     for line in reversed(lines):
         line = line.strip()
-        # Match patterns like "ExceptionName: message" or "module.ExceptionName:"
         match = re.search(r"([A-Z]\w+(?:Error|Exception|Warning))", line)
         if match:
             exc_name = match.group(1)
@@ -294,18 +293,13 @@ def _generate_fallback_queries(error_text: str, already_tried: list[str]) -> lis
             queries.append(f"{exc_name} python example")
             break
 
-    # Try the last non-empty line as a query
     for line in reversed(lines):
         line = line.strip()
         if line and not line.startswith("File ") and not line.startswith("^"):
             queries.append(line[:100])
             break
 
-    # Filter out already-tried queries
     return [q for q in queries if q not in already_tried][:3]
-
-
-import re  # noqa: E402 — needed by _generate_fallback_queries
 
 
 def _parse_args() -> argparse.Namespace:
@@ -313,30 +307,30 @@ def _parse_args() -> argparse.Namespace:
         prog="so-error-resolver",
         description=(
             "Resolve programming errors by iteratively scraping Stack Overflow "
-            "and analyzing results with Ollama AI models (cloud or local)."
+            "and analyzing results with Ollama cloud models."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  %(prog)s                          # Interactive mode\n"
-            "  %(prog)s -e 'TypeError: ...'       # Direct error input\n"
-            "  %(prog)s -m llama3 --no-proxy      # Use local llama3, no proxy\n"
-            "  %(prog)s -m minimax/m2:5 --max-iterations 8  # More iterations\n"
+            "  %(prog)s                                   # Interactive mode\n"
+            "  %(prog)s -e 'TypeError: ...'                # Direct error input\n"
+            "  %(prog)s --no-proxy                         # Skip proxy rotation\n"
+            "  %(prog)s --max-iterations 8                 # More iterations\n"
+            "  %(prog)s -m minimax/m2:5                    # Explicit cloud model\n"
         ),
     )
     parser.add_argument(
         "-m", "--model",
         default=os.getenv("OLLAMA_MODEL", "minimax/m2:5"),
         help=(
-            "Ollama model identifier. Supports cloud models like "
-            "'minimax/m2:5' and local models like 'llama3' or 'mistral'. "
-            "(default: minimax/m2:5, env: OLLAMA_MODEL)"
+            "Ollama cloud model identifier (default: minimax/m2:5, env: OLLAMA_MODEL). "
+            "Format: provider/model:tag — no local download required."
         ),
     )
     parser.add_argument(
         "--host",
         default=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        help="Ollama API endpoint. (default: http://localhost:11434, env: OLLAMA_HOST)",
+        help="Ollama API endpoint (default: http://localhost:11434, env: OLLAMA_HOST).",
     )
     parser.add_argument(
         "--no-proxy",
@@ -353,8 +347,8 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=int(os.getenv("MAX_ITERATIONS", MAX_ITERATIONS)),
         help=(
-            f"Maximum scrape-analyze-refine iterations. "
-            f"(default: {MAX_ITERATIONS}, env: MAX_ITERATIONS)"
+            f"Maximum scrape-analyze-refine iterations "
+            f"(default: {MAX_ITERATIONS}, env: MAX_ITERATIONS)."
         ),
     )
     return parser.parse_args()
@@ -366,7 +360,7 @@ def main() -> None:
     console.print(Text(BANNER, style="bold blue"))
     console.print(
         "  [dim]Stack Overflow Error Resolver — "
-        "iterative scrape + AI analysis.[/dim]\n"
+        "cloud AI + iterative scraping.[/dim]\n"
     )
 
     if args.error:

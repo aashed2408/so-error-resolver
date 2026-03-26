@@ -1,7 +1,8 @@
-"""AI Engine — Ollama cloud/local connector with prompt engineering for error resolution.
+"""AI Engine — Ollama cloud connector with prompt engineering for error resolution.
 
-Supports both local Ollama models and Ollama cloud-hosted models.
-Cloud models are specified in ``provider/model:tag`` format, e.g. ``minimax/m2:5``.
+Uses Ollama cloud-hosted models exclusively. Models are specified in
+``provider/model:tag`` format, e.g. ``minimax/m2:5``. No local model download
+is required — Ollama routes requests to its cloud infrastructure automatically.
 
 The engine can signal that more scraping is needed by setting
 :attr:`AIResolution.needs_more_data` to ``True`` and providing refined search
@@ -122,7 +123,6 @@ def _build_user_prompt(
                     parts.append(f"```python\n{cb[:500]}\n```")
 
             if q.answers:
-                # Include accepted + top-voted answers
                 for a_idx, ans in enumerate(q.answers[:2]):
                     label = "Accepted Answer" if ans.is_accepted else f"Answer #{a_idx + 1}"
                     parts.append(f"\n{label} (votes={ans.vote_count}, by {ans.author or 'unknown'}):")
@@ -163,16 +163,16 @@ def _build_user_prompt(
 
 
 class AIEngine:
-    """Wraps the Ollama Python client — works with both local and cloud models.
+    """Wraps the Ollama Python client for cloud-hosted models.
 
     Cloud models use the ``provider/model:tag`` naming convention
-    (e.g. ``minimax/m2:5``). The Ollama server handles routing automatically.
+    (e.g. ``minimax/m2:5``). Ollama handles routing to its cloud
+    infrastructure automatically — no local model download required.
 
     Parameters
     ----------
     model:
-        Ollama model identifier. Use ``minimax/m2:5`` for the MiniMax cloud model,
-        or ``llama3`` / ``mistral`` for local models.
+        Ollama cloud model identifier, e.g. ``minimax/m2:5``.
     host:
         Ollama API endpoint. Default is ``http://localhost:11434``.
     timeout:
@@ -206,7 +206,7 @@ class AIEngine:
         max_iterations: int = 5,
         previous_queries: list[str] | None = None,
     ) -> AIResolution:
-        """Send error + scraped data to Ollama and return a structured resolution.
+        """Send error + scraped data to the Ollama cloud model.
 
         If the model signals it needs more data (low confidence + refined queries),
         the caller should scrape more threads and call this method again.
@@ -240,12 +240,12 @@ class AIEngine:
             except asyncio.TimeoutError:
                 if attempt == self._max_retries:
                     return AIResolution(
-                        root_cause="Ollama request timed out.",
+                        root_cause="Ollama cloud request timed out.",
                         fix_recommendation=(
-                            "The LLM did not respond in time. "
-                            "If using a cloud model, check your internet connection. "
-                            "For local models, ensure `ollama serve` is running and the "
-                            f"model '{self._model}' is loaded."
+                            "The cloud model did not respond in time. "
+                            "Check your internet connection and try again. "
+                            "You can also try increasing the timeout with "
+                            "the REQUEST_TIMEOUT environment variable."
                         ),
                         confidence="Low",
                         relevant_threads=[q.url for q in questions],
@@ -259,12 +259,12 @@ class AIEngine:
                     return AIResolution(
                         root_cause=f"Ollama connection error: {exc}",
                         fix_recommendation=(
-                            f"Could not connect to Ollama at {self._host}.\n\n"
+                            f"Could not reach Ollama cloud via {self._host}.\n\n"
                             "Troubleshooting:\n"
-                            "1. Ensure Ollama is running: `ollama serve`\n"
-                            "2. Verify the model is available: `ollama list`\n"
-                            f"3. Pull the model if needed: `ollama pull {self._model}`\n"
-                            "4. For cloud models, ensure Ollama has internet access."
+                            "1. Ensure Ollama is installed: https://ollama.ai\n"
+                            "2. Start the server: `ollama serve`\n"
+                            "3. Ensure you have internet connectivity.\n"
+                            f"4. Verify the model name: `{self._model}`"
                         ),
                         confidence="Low",
                         relevant_threads=[q.url for q in questions],
@@ -293,17 +293,6 @@ class AIEngine:
             return False, f"Timed out connecting to Ollama at {self._host}."
         except Exception as exc:
             return False, f"Cannot reach Ollama: {exc}"
-
-    async def pull_model(self) -> str:
-        """Pull/download the model if not already available."""
-        try:
-            await asyncio.wait_for(
-                self._client.pull(model=self._model, stream=False),
-                timeout=300.0,
-            )
-            return f"Model '{self._model}' is ready."
-        except Exception as exc:
-            return f"Failed to pull model: {exc}"
 
     # ─────────────────── response parser ───────────────────────────
 
@@ -352,7 +341,6 @@ class AIEngine:
                     if stripped and len(stripped) > 5:
                         refined.append(stripped)
 
-        # Map section headers
         SECTION_MAP = {
             "ROOT CAUSE": "ROOT CAUSE",
             "ROOT_CAUSE": "ROOT CAUSE",
@@ -382,7 +370,6 @@ class AIEngine:
                 _flush()
                 current_section = matched_section
                 buffer = []
-                # Capture text after the colon on the same line
                 after = line.split(":", 1)
                 if len(after) > 1 and after[1].strip():
                     buffer.append(after[1].strip())
@@ -391,15 +378,12 @@ class AIEngine:
 
         _flush()
 
-        # Fallbacks
         if not threads:
             threads = [q.url for q in questions[:3]]
         if not root_cause:
             root_cause = "Unable to parse root cause from LLM response."
         if not fix:
             fix = raw
-
-        # Auto-set needs_more if confidence is Low and no refined queries yet
         if confidence == "Low" and not refined:
             needs_more = True
 
